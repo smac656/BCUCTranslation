@@ -10,13 +10,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-CHUNK_SECONDS = int(os.getenv('CHUNK_SECONDS', '3'))
-LANGUAGES = [s.strip() for s in os.getenv('LANGUAGES', 'zh,ne').split(',') if s.strip()]
+LANGUAGES = [s.strip() for s in os.getenv('LANGUAGES', 'zh,es').split(',') if s.strip()]
 
 app = FastAPI()
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
-# WebSocket connection manager
+# --- WebSocket manager ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -26,7 +25,8 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
         data = json.dumps(message)
@@ -41,20 +41,23 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Load Bible dictionary from JSON config
-BIBLE_DICT_PATH = os.path.join(os.path.dirname(__file__), 'bible_dict.json')
-with open(BIBLE_DICT_PATH, 'r', encoding='utf-8') as f:
-    BIBLE_DICT = json.load(f)
-    
+# --- Bible dictionary ---
+BIBLE_DICT_PATH = 'bible_dict.json'
+if os.path.exists(BIBLE_DICT_PATH):
+    with open(BIBLE_DICT_PATH, 'r', encoding='utf-8') as f:
+        BIBLE_DICT = json.load(f)
+else:
+    BIBLE_DICT = {}
 
 def apply_bible_dictionary(text: str) -> str:
     for word, phonetic in BIBLE_DICT.items():
         text = text.replace(word, phonetic)
     return text
 
+# --- Routes ---
 @app.get('/')
 async def root():
-    return "Server running"
+    return {"status": "Server running"}
 
 @app.websocket('/ws')
 async def websocket_endpoint(websocket: WebSocket):
@@ -67,8 +70,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post('/transcribe')
 async def transcribe_chunk(file: UploadFile = File(...)):
-    tmp_path = f"/temp/{file.filename}"
-    os.makedirs("/temp", exist_ok=True)
+    tmp_dir = "/temp"
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_path = os.path.join(tmp_dir, file.filename)
     with open(tmp_path, 'wb') as f:
         f.write(await file.read())
 
@@ -80,7 +84,7 @@ async def transcribe_chunk(file: UploadFile = File(...)):
     for lang in LANGUAGES:
         translations[lang] = await call_openai_translate(transcribed_text, lang)
 
-    # Generate TTS for each translation
+    # Generate TTS
     tts_audio_base64 = {}
     for lang, text in translations.items():
         text_for_tts = apply_bible_dictionary(text)
@@ -100,10 +104,9 @@ async def transcribe_chunk(file: UploadFile = File(...)):
     except Exception:
         pass
 
-    return {'status': 'ok', 'english': transcribed_text, 'translations': translations,'tts': tts_audio_base64}
+    return {'status': 'ok', 'english': transcribed_text, 'translations': translations}
 
-# --- OpenAI calls ---
-
+# --- OpenAI API calls ---
 async def call_openai_transcription(audio_filepath: str) -> str:
     headers = {'Authorization': f'Bearer {OPENAI_API_KEY}'}
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -117,8 +120,8 @@ async def call_openai_transcription(audio_filepath: str) -> str:
 
 async def call_openai_translate(text: str, target_language: str) -> str:
     system_prompt = (
-        'You are a concise translator. Translate the provided English sermon speech into the target language. '
-        'Keep it short, literal, suitable for live captions.'
+        "You are a concise translator. Translate the provided English sermon speech "
+        "into the target language. Keep it short, literal, suitable for live captions."
     )
     user_prompt = f"Translate the following into {target_language} concisely:\n\n{text}"
     headers = {'Authorization': f'Bearer {OPENAI_API_KEY}', 'Content-Type': 'application/json'}
@@ -140,13 +143,8 @@ async def call_openai_translate(text: str, target_language: str) -> str:
         return ''
 
 async def call_openai_tts(text: str) -> str:
-    """Call OpenAI TTS endpoint and return base64-encoded audio"""
     headers = {'Authorization': f'Bearer {OPENAI_API_KEY}', 'Content-Type': 'application/json'}
-    payload = {
-        'model': 'gpt-4o-mini-tts',  # Example TTS model
-        'voice': 'alloy',
-        'input': text
-    }
+    payload = {'model': 'gpt-4o-mini-tts', 'voice': 'alloy', 'input': text}
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post('https://api.openai.com/v1/audio/speech', json=payload, headers=headers)
         resp.raise_for_status()
