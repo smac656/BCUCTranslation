@@ -1,0 +1,12 @@
+pkg_resources
+fastapi
+uvicorn[standard]
+websockets
+httpx
+sounddevice
+soundfile
+python-dotenv
+python-multipart
+aiofiles
+requests
+webrtcvad
