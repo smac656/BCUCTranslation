@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Live Translation - Attendee</title>
+<style>
+    body { font-family: Arial; padding: 20px; }
+    #translation { font-size: 1.5em; margin-top: 20px; min-height: 50px; }
+    #status { margin-bottom: 20px; }
+    .status-label { font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>Live Translation</h1>
+
+<div id="status">
+    <div><span class="status-label">Session Status:</span> <span id="session_status">Unknown</span></div>
+    <div><span class="status-label">Recorder Status:</span> <span id="recorder_status">Unknown</span></div>
+</div>
+
+<label for="language">Select language:</label>
+<select id="language">
+    <option value="en">English</option>
+    <option value="es">Spanish</option>
+    <option value="zh">Chinese</option>
+</select>
+
+<div id="translation">Waiting for translation...</div>
+
+<script>
+const sessionSpan = document.getElementById("session_status");
+const recorderSpan = document.getElementById("recorder_status");
+const translationDiv = document.getElementById("translation");
+const languageSelect = document.getElementById("language");
+
+// Connect to attendee WebSocket
+const ws = new WebSocket("ws://localhost:8000/ws/attendee");
+
+ws.onopen = () => {
+    console.log("Connected to server WebSocket.");
+};
+
+ws.onmessage = async (event) => {
+    const data = JSON.parse(event.data);
+
+    // Update session/recorder status
+    if (data.type === "status") {
+        sessionSpan.innerText = data.session_active ? "Active" : "Inactive";
+        recorderSpan.innerText = data.recorder_running ? "Running" : "Stopped";
+    }
+
+    // Update translation text and play audio
+    if (data.type === "translation") {
+        const lang = languageSelect.value;
+        const text = data.text[lang] || "[No translation]";
+        translationDiv.innerText = text;
+
+        // Play TTS audio if available
+        if (data.audio_base64) {
+            try {
+                const audio = new Audio("data:audio/mpeg;base64," + data.audio_base64);
+                await audio.play();
+            } catch (err) {
+                console.log("Audio playback error:", err);
+            }
+        }
+    }
+};
+
+ws.onclose = () => {
+    console.log("WebSocket disconnected.");
+    sessionSpan.innerText = "Disconnected";
+    recorderSpan.innerText = "Disconnected";
+    translationDiv.innerText = "Connection lost.";
+};
+</script>
+
+</body>
+</html>

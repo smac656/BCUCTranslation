@@ -1,0 +1,44 @@
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,15 +1,33 @@
+-# Existing dependencies
+-fastapi
+-uvicorn
+-websockets
+-sounddevice
+-soundfile
+-webrtcvad
+-numpy
+-httpx
+-openai
+-python-multipart
+-pydub
+-aiofiles
+---------
+
+-# Other packages may exist
++# --- FastAPI server + WebSockets ---
++fastapi>=0.111.0
++uvicorn[standard]>=0.30.0
++python-multipart>=0.0.9
++websockets>=12.0
++
++# --- Audio processing ---
++sounddevice>=0.4.6
++soundfile>=0.12.1
++webrtcvad>=2.0.10
++numpy>=1.26.0
++pydub>=0.25.1
++
++# --- OpenAI / API client ---
++openai>=1.35.0
++httpx>=0.27.0
++
++# --- Utility packages ---
++asyncio
++jinja2>=3.1.4
++
++# --- Optional: Static file serving (for HTML/JS UI) ---
++aiofiles>=23.2.1
++
++# Removed packages: streamlit, older openai clients, redundant Starlette, unused GUI libs
