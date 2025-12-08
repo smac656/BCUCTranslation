@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Live Translation - Attendee</title>
+<style>
+    body { font-family: Arial; padding: 20px; }
+    #translation { font-size: 1.5em; margin-top: 20px; min-height: 50px; }
+    #status { margin-bottom: 20px; }
+    .status-label { font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>Live Translation</h1>
+
+<div id="status">
+    <div><span class="status-label">Session Status:</span> <span id="session_status">Unknown</span></div>
+    <div><span class="status-label">Recorder Status:</span> <span id="recorder_status">Unknown</span></div>
+</div>
+
+<label for="language">Select language:</label>
+<select id="language">
+    <option value="en">English</option>
+    <option value="es">Spanish</option>
+    <option value="zh">Chinese</option>
+</select>
+
+<div id="translation">Waiting for translation...</div>
+
+<script>
+const sessionSpan = document.getElementById("session_status");
+const recorderSpan = document.getElementById("recorder_status");
+const translationDiv = document.getElementById("translation");
+const languageSelect = document.getElementById("language");
+
+// --- Full transcript buffer ---
+let fullTranscript = "";
+
+// Connect to attendee WebSocket
+const ws = new WebSocket("ws://localhost:8000/ws/attendee");
+
+ws.onopen = () => {
+    console.log("Connected to server WebSocket.");
+};
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    // -----------------------
+    // STATUS UPDATES
+    // -----------------------
+    if (data.type === "status") {
+        sessionSpan.innerText = data.session_active ? "Active" : "Inactive";
+        recorderSpan.innerText = data.recorder_running ? "Running" : "Stopped";
+        return;
+    }
+
+    // -----------------------
+    // IGNORE ALL PARTIALS
+    // -----------------------
+    if (data.type === "partial") {
+        return;  // completely ignore partial live captions
+    }
+
+    // -----------------------
+    // FINAL TRANSLATION ONLY
+    // -----------------------
+    if (data.type === "translation") {
+        const lang = languageSelect.value;
+        const text = data.text[lang] || "[No translation]";
+
+        // Append to transcript
+        fullTranscript += text + "\n\n";
+
+        // Display updated transcript
+        translationDiv.innerText = fullTranscript;
+
+        // Auto-scroll
+        translationDiv.scrollTop = translationDiv.scrollHeight;
+
+        // Play TTS if available
+        if (data.tts && data.tts[lang]) {
+            const binaryString = atob(data.tts[lang]);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+            const blob = new Blob([bytes], { type: 'audio/wav' });
+            const url = URL.createObjectURL(blob);
+            new Audio(url).play().catch(e => console.log("Audio play error", e));
+        }
+    }
+};
+
+ws.onclose = () => {
+    console.log("WebSocket disconnected.");
+    sessionSpan.innerText = "Disconnected";
+    recorderSpan.innerText = "Disconnected";
+    translationDiv.innerText = "Connection lost.";
+};
+</script>
+
+
+</body>
+</html>
