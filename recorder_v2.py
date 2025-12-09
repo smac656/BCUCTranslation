@@ -68,6 +68,13 @@ async def sender_loop():
                 if arr.dtype != np.int16:
                     arr = arr.astype(np.int16)
 
+                    # --- Mild silence gate (very conservative) ---
+                    if arr.ptp() < 5000:
+                        # Skip truly silent blocks, but still allow soft speech downstream
+                        continue
+                    # ------------------------------------------------
+                   
+
                 bts = arr.tobytes()
 
                 try:
