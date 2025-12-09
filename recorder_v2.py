@@ -50,35 +50,43 @@ async def sender_loop():
         last_send = time.time()
 
         while True:
-            # Try to pull a block from the queue without blocking the whole loop
+            # Pull PCM frames
             try:
                 block = pcm_queue.get(timeout=0.1)
                 buffer.append(block)
             except queue.Empty:
-                block = None
+                pass
 
             now = time.time()
             elapsed = now - last_send
 
             if elapsed >= CHUNK_SECONDS and buffer:
-                # Concatenate buffered blocks into one continuous chunk
+
+                # Combine blocks
                 arr = np.concatenate(buffer, axis=0)
 
-                # Safety: ensure correct dtype
+                # Convert to int16 FIRST — must happen before p2p
                 if arr.dtype != np.int16:
                     arr = arr.astype(np.int16)
 
-                    # --- Mild silence gate (very conservative) ---
-                    if arr.ptp() < 5000:
-                        # Skip truly silent blocks, but still allow soft speech downstream
-                        continue
-                    # ------------------------------------------------
-                   
+                # Compute amplitude ONCE — this value is final
+                amplitude = int(np.ptp(arr))
 
+                print(f"DEBUG: dtype={arr.dtype}, amplitude={amplitude}")
+
+                # Silence gate
+                if amplitude < 600:
+                    print(f"Silence: skipping chunk (p2p={amplitude})")
+                    buffer.clear()
+                    last_send = now
+                    await asyncio.sleep(0.001)
+                    continue
+
+                # Convert to bytes and send
                 bts = arr.tobytes()
+                print(f"Sending chunk: {len(bts)} bytes")
 
                 try:
-                    print(f"Sending chunk: {len(bts)} bytes")
                     resp = await client.post(SERVER_CHUNK_URL, content=bts)
                     print("✔️  Server replied:", resp.status_code, resp.text[:200])
                 except Exception as e:
@@ -87,8 +95,9 @@ async def sender_loop():
                 buffer.clear()
                 last_send = now
 
-            # Tiny sleep to avoid busy-looping the event loop
             await asyncio.sleep(0.001)
+
+
 
 
 def start_async_loop(loop: asyncio.AbstractEventLoop):
