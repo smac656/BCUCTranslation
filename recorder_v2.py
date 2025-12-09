@@ -72,11 +72,8 @@ async def sender_loop():
                 # Compute amplitude ONCE — this value is final
                 amplitude = int(np.ptp(arr))
 
-                print(f"DEBUG: dtype={arr.dtype}, amplitude={amplitude}")
-
                 # Silence gate
                 if amplitude < 600:
-                    print(f"Silence: skipping chunk (p2p={amplitude})")
                     buffer.clear()
                     last_send = now
                     await asyncio.sleep(0.001)
@@ -84,11 +81,9 @@ async def sender_loop():
 
                 # Convert to bytes and send
                 bts = arr.tobytes()
-                print(f"Sending chunk: {len(bts)} bytes")
 
                 try:
                     resp = await client.post(SERVER_CHUNK_URL, content=bts)
-                    print("✔️  Server replied:", resp.status_code, resp.text[:200])
                 except Exception as e:
                     print("Send error:", repr(e))
 
