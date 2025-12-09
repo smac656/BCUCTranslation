@@ -1,101 +1,144 @@
 """
-recorder_v2.py
-- Proper non-blocking recorder for server_v4.
-- Uses a background asyncio loop for HTTP POSTs.
-- Sounddevice callback never blocks.
-"""
-print("🔥 RUNNING NEW RECORDER_V2.PY VERSION")
+recorder_v2.py - Non-blocking microphone recorder for BCUCTranslation.
 
+- Captures PCM16 mono @ 16 kHz from the default input device (or a chosen device).
+- Pushes raw PCM blocks into a thread-safe queue from the sounddevice callback.
+- A background asyncio task batches ~1s of audio and POSTs it to the FastAPI server
+  at /audio_chunk as raw bytes.
+
+This script is intentionally simple and robust: the audio callback never blocks and
+network hiccups only affect the sender loop, not recording.
+"""
 
 import argparse
-import threading
 import asyncio
 import queue
 import sys
+import threading
 import time
-import base64
-import sounddevice as sd
+from typing import Optional
+
 import httpx
 import numpy as np
+import sounddevice as sd
 
 SERVER_CHUNK_URL = "http://localhost:8000/audio_chunk"
 CHUNK_SECONDS = 1.0
 CHANNELS = 1
-DTYPE = 'int16'
+DTYPE = "int16"
 
-# Thread-safe queue for PCM blocks
-pcm_queue = queue.Queue()
+# Thread-safe queue for PCM blocks coming from the audio callback
+pcm_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+
 
 def audio_callback(indata, frames, time_info, status):
+    """Callback from sounddevice.InputStream.
+
+    Runs on a realtime audio thread. We must not block here.
+    """
     if status:
-        print("Status:", status, file=sys.stderr)
-    # push a copy of the PCM block
+        print("Audio status:", status, file=sys.stderr)
+
+    # Make a copy so sounddevice can safely reuse its buffer
     pcm_queue.put(indata.copy())
 
-# ------------- Async Sender Loop -------------
+
 async def sender_loop():
-    async with httpx.AsyncClient(timeout=20) as client:
+    """Async loop that batches PCM blocks and sends them to the server."""
+    async with httpx.AsyncClient(timeout=20.0) as client:
         buffer = []
         last_send = time.time()
 
         while True:
-            # Pull from thread-safe queue (non-async)
+            # Try to pull a block from the queue without blocking the whole loop
             try:
                 block = pcm_queue.get(timeout=0.1)
                 buffer.append(block)
-            except Exception:
-                pass
+            except queue.Empty:
+                block = None
 
-            elapsed = time.time() - last_send
+            now = time.time()
+            elapsed = now - last_send
+
             if elapsed >= CHUNK_SECONDS and buffer:
+                # Concatenate buffered blocks into one continuous chunk
                 arr = np.concatenate(buffer, axis=0)
+
+                # Safety: ensure correct dtype
+                if arr.dtype != np.int16:
+                    arr = arr.astype(np.int16)
+
                 bts = arr.tobytes()
 
                 try:
-#                    await client.post(SERVER_CHUNK_URL, content=bts)
-
-                    print("🚀 Sending chunk:", len(bts))
+                    print(f"Sending chunk: {len(bts)} bytes")
                     resp = await client.post(SERVER_CHUNK_URL, content=bts)
-                    print("✔️ Server replied:", resp.status_code, resp.text)
-
+                    print("✔️  Server replied:", resp.status_code, resp.text[:200])
                 except Exception as e:
-                    print("Send error:", e)
+                    print("Send error:", repr(e))
 
-                buffer = []
-                last_send = time.time()
+                buffer.clear()
+                last_send = now
 
+            # Tiny sleep to avoid busy-looping the event loop
             await asyncio.sleep(0.001)
 
-# ------------- Start Async Loop in Background Thread -------------
-def start_async_loop(loop):
+
+def start_async_loop(loop: asyncio.AbstractEventLoop):
+    """Run the sender_loop inside its own event loop in a background thread."""
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(sender_loop())
+    loop.create_task(sender_loop())
+    try:
+        loop.run_forever()
+    finally:
+        # Best-effort cleanup
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        try:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+        loop.close()
 
-# ------------- Main Entrypoint -------------
+
 def main(args):
-    samplerate = args.samplerate
-    device = None if args.device == 'default' else (
-        int(args.device) if args.device.isdigit() else args.device
-    )
+    samplerate: int = args.samplerate
 
-    # Create background event loop for async tasks
+    # "default" -> None for sounddevice, digits -> device index, else device name
+    if args.device == "default":
+        device: Optional[int | str] = None
+    elif args.device.isdigit():
+        device = int(args.device)
+    else:
+        device = args.device
+
+    # Background event loop for HTTP POSTs
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=start_async_loop, args=(loop,), daemon=True)
     thread.start()
 
-    # Start microphone
-    stream = sd.InputStream(samplerate=samplerate, device=device,
-                            channels=CHANNELS, dtype=DTYPE,
-                            callback=audio_callback)
+    # Start microphone stream
+    stream = sd.InputStream(
+        samplerate=samplerate,
+        device=device,
+        channels=CHANNELS,
+        dtype=DTYPE,
+        callback=audio_callback,
+    )
 
+    print("Recorder started. Press Ctrl+C to stop.")
     with stream:
-        print("Recorder started. Press Ctrl+C to stop.")
         try:
             while True:
                 time.sleep(0.1)
         except KeyboardInterrupt:
             print("Stopping recorder...")
-            loop.stop()
+        finally:
+            # Stop the background loop
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=5.0)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
