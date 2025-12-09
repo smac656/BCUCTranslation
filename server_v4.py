@@ -298,45 +298,42 @@ class RealtimeTranscriber:
     async def _sender_loop(self):
         """
         Correct Realtime API audio sender.
+
         Sends PCM16 bytes as:
             { "type": "input_audio_buffer.append",
-              "audio_base64": "<b64>" }
+              "audio": "<base64 pcm16>" }
 
-        And then:
-            { "type": "input_audio_buffer.commit" }
+        NOTE:
+        - We rely on *server VAD*, so we do NOT send
+          input_audio_buffer.commit ourselves. This avoids
+          'commit_empty' errors and lets the model decide
+          turn boundaries.
         """
         while self.running:
+            # Raw PCM16 bytes from /audio_chunk
             pcm = await self.audio_queue.get()
             if not pcm:
                 continue
 
-            # base64 encode
+            # Base64 encode
             b64 = base64.b64encode(pcm).decode("ascii")
 
-            logger.error("SENDING EVENT: %s", json.dumps({
+            payload = {
                 "type": "input_audio_buffer.append",
-                "audio_base64": b64
-            })[:200])
-           
+                "audio": b64,
+            }
 
-            # 1) append audio chunk
+            logger.info("SENDING EVENT: %s", json.dumps(payload)[:200])
+
             try:
-                await self.ws.send(json.dumps({
-                    "type": "input_audio_buffer.append",
-                    "audio_base64": b64
-                }))
-            except Exception:
+                await self.ws.send(json.dumps(payload))
+            except ConnectionClosed:
                 logger.warning("Realtime WebSocket closed while sending audio")
                 break
-
-            # 2) commit buffer
-            try:
-                await self.ws.send(json.dumps({
-                    "type": "input_audio_buffer.commit"
-                }))
             except Exception:
-                logger.warning("Failed to send input_audio_buffer.commit")
+                logger.exception("Error sending audio to Realtime WebSocket")
                 break
+
 
     async def _receiver_loop(self):
         """
