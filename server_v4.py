@@ -72,7 +72,7 @@ recorder_proc: Optional[subprocess.Popen] = None
 # ---------------------------------------------------------
 def is_chunk_loud_enough(
     wav_path: str,
-    rms_threshold: float = 0.004,  # slightly more permissive
+    rms_threshold: float = 0.02,  # slightly more permissive
     min_duration: float = 0.15,    # allow shorter spoken chunks
 ) -> bool:
     """
