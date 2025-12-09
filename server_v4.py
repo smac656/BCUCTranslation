@@ -1,238 +1,281 @@
-# server_v4.py — PURE TRANSCRIPTION MODE
+import os
+import json
 import base64
 import asyncio
-import json
 import logging
-from typing import Optional, Dict, Any
+import subprocess
+from typing import Optional
 
-import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
-from starlette.websockets import WebSocketState
-from fastapi.middleware.cors import CORSMiddleware
-import websockets
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
-import os
+from websockets import connect as ws_connect
 
-# -----------------------------------------------------------------------------
-# CONFIG
-# -----------------------------------------------------------------------------
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
-
-CHUNK_SAVE_DIR = "./uploaded_audio_chunks"
-os.makedirs(CHUNK_SAVE_DIR, exist_ok=True)
-
+# ------------------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("server_v4")
 
-app = FastAPI()
+# ------------------------------------------------------------------------------
+# Environment and constants
+# ------------------------------------------------------------------------------
+from dotenv import load_dotenv
+load_dotenv()
 
-# Allow WS from any origin (adjust later if needed)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Missing OPENAI_API_KEY in environment or .env")
+
+# IMPORTANT: Correct transcription-capable realtime model
+REALTIME_MODEL = "gpt-4o-mini-realtime-preview-2024-12-17"
+
+OPENAI_REALTIME_URL = (
+    f"wss://api.openai.com/v1/realtime?model={REALTIME_MODEL}"
 )
 
+# ------------------------------------------------------------------------------
+# FastAPI setup
+# ------------------------------------------------------------------------------
+app = FastAPI()
 
-# -----------------------------------------------------------------------------
-# WEBSOCKET CONNECTION MANAGER
-# -----------------------------------------------------------------------------
-class ConnectionManager:
-    def __init__(self):
-        self.operator_ws: Optional[WebSocket] = None
-        self.attendee_ws: Optional[WebSocket] = None
+# Serve /static/* from ./static directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-    async def connect_operator(self, websocket: WebSocket):
-        await websocket.accept()
-        self.operator_ws = websocket
-        logger.info("Operator connected.")
+# Global flags
+session_active = False
+recorder_process: Optional[subprocess.Popen] = None
 
-    async def connect_attendee(self, websocket: WebSocket):
-        await websocket.accept()
-        self.attendee_ws = websocket
-        logger.info("Attendee connected.")
+# Operator WebSocket clients
+operator_websockets = set()
 
-    async def broadcast_operator(self, message: Dict[str, Any]):
-        if self.operator_ws and self.operator_ws.client_state == WebSocketState.CONNECTED:
-            await self.operator_ws.send_json(message)
-
-    async def broadcast_attendee(self, message: Dict[str, Any]):
-        if self.attendee_ws and self.attendee_ws.client_state == WebSocketState.CONNECTED:
-            await self.attendee_ws.send_json(message)
-
-
-manager = ConnectionManager()
-
-
-# -----------------------------------------------------------------------------
-# REALTIME TRANSCRIBER — TRANSCRIPTION ONLY MODE
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Realtime WebSocket client
+# ------------------------------------------------------------------------------
 class RealtimeTranscriber:
-    """
-    Handles Realtime API WebSocket session in **transcription-only mode**.
-    """
-
     def __init__(self):
         self.ws = None
+        self.running = True
 
     async def connect(self):
-        logger.info("Connecting to OpenAI Realtime WS (transcription-only)…")
-
+        """
+        Connect to OpenAI Realtime WebSocket.
+        Retries until success.
+        """
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "OpenAI-Beta": "realtime=v1",
         }
 
-        self.ws = await websockets.connect(
-            OPENAI_REALTIME_URL,
-            extra_headers=headers,
-            max_size=20_000_000,
-        )
-        logger.info("Connected to Realtime API.")
+        while True:
+            try:
+                logger.info("Connecting to OpenAI Realtime WS (transcription)…")
 
-        # Tell OpenAI we want ONLY transcription — no text/audio generation
-        session_update = {
-            "type": "session.update",
-            "session": {
-                "modalities": ["audio"],
-                "response_mode": "none",   # important
-                "instructions": "Transcribe spoken audio only. Do not generate responses.",
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "silence_duration_ms": 300,
-                    "prefix_padding_ms": 150,
-                    "create_response": True,
-                },
-            },
-        }
+                self.ws = await ws_connect(
+                    OPENAI_REALTIME_URL,
+                    extra_headers=headers,
+                    max_size=20_000_000,
+                )
 
-        await self.ws.send(json.dumps(session_update))
-        logger.info("Sent session.update for transcription-only mode.")
+                logger.info("Connected to Realtime API.")
 
-    async def send_audio_bytes(self, pcm_bytes: bytes):
+                # --------------------------------------------------------------
+                # Send session.update to enforce TRANSCRIPTION-ONLY behavior
+                # --------------------------------------------------------------
+                session_update = {
+                    "type": "session.update",
+                    "session": {
+                        "modalities": ["audio"],
+                        "response_modalities": ["transcript"],
+                        "temperature": 0,
+                        "tool_choice": "none",
+
+                        "instructions": (
+                            "You perform speech-to-text transcription ONLY. "
+                            "You MUST NOT greet, reply, comment, ask, or output assistant text. "
+                            "Return ONLY transcript deltas of spoken audio."
+                        ),
+
+                        "input_audio_format": "pcm16",
+                        "input_audio_mode": "buffer",
+
+                        "input_audio_transcription": {
+                            "model": "gpt-4o-mini-transcribe",
+                            "language": "en",
+                            "enabled": True
+                        },
+
+                        "turn_detection": {"type": "none"},
+                    }
+                }
+
+                await self.ws.send(json.dumps(session_update))
+                logger.info("Sent session.update for transcription-only mode.")
+
+                return
+
+            except Exception as e:
+                logger.error(f"Realtime connection failed: {e}")
+                await asyncio.sleep(3)
+
+    async def send_audio_chunk(self, pcm_bytes: bytes):
         """
-        Append base64 PCM16 audio to the Realtime buffer,
-        then commit so the model processes it.
+        Sends raw PCM16 audio to Realtime input_audio_buffer.
         """
         if not self.ws:
             return
 
-        event_append = {
-            "type": "input_audio_buffer.append",
-            "audio": base64.b64encode(pcm_bytes).decode("ascii"),
-        }
-        await self.ws.send(json.dumps(event_append))
+        try:
+            event = {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(pcm_bytes).decode("ascii"),
+            }
+            await self.ws.send(json.dumps(event))
+        except Exception as e:
+            logger.error(f"WS send failure: {e}")
 
-        # Always commit immediately — chunk boundaries come from recorder
-        await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-
-    async def listen_loop(self):
+    async def commit(self):
         """
-        Handle transcription events only.
+        Commit buffered audio (end of utterance).
         """
-        while True:
-            try:
-                raw = await self.ws.recv()
-            except Exception as e:
-                logger.error(f"Realtime WS error: {e}")
-                break
+        if not self.ws:
+            return
 
-            logger.debug(f"Realtime raw event: {raw}")
+        try:
+            event = {"type": "input_audio_buffer.commit"}
+            await self.ws.send(json.dumps(event))
+        except Exception as e:
+            logger.error(f"WS commit failure: {e}")
 
-            try:
-                event = json.loads(raw)
-            except:
-                continue
+    async def receive_loop(self):
+        """
+        Reads realtime transcription events.
+        Only processes transcript deltas.
+        """
+        if not self.ws:
+            return
 
-            etype = event.get("type")
-            logger.info(f"Realtime event: {etype}")
+        try:
+            async for msg in self.ws:
+                try:
+                    data = json.loads(msg)
+                except:
+                    continue
 
-            # We ONLY care about:
-            # response.audio_transcript.delta
-            # response.audio_transcript.done
-            # Everything else is ignored silently
+                event_type = data.get("type")
 
-            if etype == "response.audio_transcript.delta":
-                delta = event.get("delta", "")
-                logger.info(f"TRANSCRIPT DELTA: {delta}")
+                # Only respond to transcript deltas
+                if event_type == "response.audio_transcript.delta":
+                    delta_text = data.get("delta")
+                    if delta_text:
+                        logger.info(f"TRANSCRIPT DELTA: {delta_text}")
+                        await broadcast_to_operators({"type": "transcript", "delta": delta_text})
 
-                # Send partial transcript to operator only
-                await manager.broadcast_operator({
-                    "type": "transcript_delta",
-                    "text": delta
-                })
+                elif event_type == "response.audio_transcript.done":
+                    final_text = data.get("transcript", "")
+                    logger.info(f"TRANSCRIPT DONE: {final_text}")
+                    await broadcast_to_operators({"type": "transcript_done", "text": final_text})
 
-            elif etype == "response.audio_transcript.done":
-                text = event.get("transcript", "")
-                logger.info(f"TRANSCRIPT DONE: {text}")
+                else:
+                    # Ignore assistant messages or other content
+                    pass
 
-                # Send final text to operator and attendee
-                await manager.broadcast_operator({
-                    "type": "transcript_done",
-                    "text": text
-                })
-                await manager.broadcast_attendee({
-                    "type": "transcript_done",
-                    "text": text
-                })
+        except Exception as e:
+            logger.error(f"Realtime WS error: {e}")
 
-            else:
-                # Ignore everything else
-                pass
-
-
+# Global realtime client
 transcriber = RealtimeTranscriber()
 
+# ------------------------------------------------------------------------------
+# Broadcast helper
+# ------------------------------------------------------------------------------
+async def broadcast_to_operators(payload: dict):
+    dead = []
+    for ws in operator_websockets:
+        try:
+            await ws.send_json(payload)
+        except:
+            dead.append(ws)
+    for ws in dead:
+        operator_websockets.remove(ws)
 
-# -----------------------------------------------------------------------------
-# FASTAPI ROUTES
-# -----------------------------------------------------------------------------
-@app.post("/audio_chunk")
-async def receive_audio_chunk(raw_audio: bytes):
-    """
-    Recorder sends PCM16 bytes here.
-    """
-    logger.info(f"Received {len(raw_audio)} bytes")
+# ------------------------------------------------------------------------------
+# API Endpoints
+# ------------------------------------------------------------------------------
 
-    # Forward to Realtime API
-    await transcriber.send_audio_bytes(raw_audio)
+@app.get("/")
+async def root():
+    return FileResponse("static/operator.html")
+
+@app.post("/start_session")
+async def start_session():
+    global session_active
+    session_active = True
+    logger.info("Session started via /start_session")
+
+    # Start websocket receive loop
+    asyncio.create_task(transcriber.receive_loop())
 
     return {"status": "ok"}
 
+@app.post("/start_recorder")
+async def start_recorder():
+    global recorder_process
+
+    if recorder_process and recorder_process.poll() is None:
+        return {"status": "already_running"}
+
+    logger.info("Starting recorder_v2.py...")
+    recorder_process = subprocess.Popen(["python", "recorder_v2.py"])
+    return {"status": "ok"}
+
+@app.post("/stop_recorder")
+async def stop_recorder():
+    global recorder_process
+
+    if recorder_process and recorder_process.poll() is None:
+        logger.info("Stopping recorder...")
+        recorder_process.terminate()
+        recorder_process = None
+        return {"status": "ok"}
+
+    logger.info("Recorder not running when /stop_recorder called.")
+    return {"status": "not_running"}
+
+@app.post("/audio_chunk")
+async def receive_chunk(request: Request):
+    """
+    Receives PCM16 audio chunks from recorder_v2.py.
+    Sends them to the Realtime API.
+    """
+    global session_active
+
+    if not session_active:
+        return {"status": "ignored", "reason": "no active session"}
+
+    body = await request.body()
+    logger.info(f"Received {len(body)} audio bytes (session_active=True)")
+
+    await transcriber.send_audio_chunk(body)
+    return {"status": "ok"}
 
 @app.websocket("/ws/operator")
-async def operator_ws(websocket: WebSocket):
-    await manager.connect_operator(websocket)
+async def ws_operator(ws: WebSocket):
+    await ws.accept()
+    operator_websockets.add(ws)
+    logger.info("Operator connected.")
+
     try:
         while True:
-            await websocket.receive_text()
+            await ws.receive_text()  # keep connection open
     except WebSocketDisconnect:
+        operator_websockets.remove(ws)
         logger.info("Operator disconnected.")
 
-
-@app.websocket("/ws/attendee")
-async def attendee_ws(websocket: WebSocket):
-    await manager.connect_attendee(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        logger.info("Attendee disconnected.")
-
-
+# ------------------------------------------------------------------------------
+# Startup
+# ------------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(transcriber.connect())
-    asyncio.create_task(transcriber.listen_loop())
-
-
-# Simple root endpoint
-@app.get("/")
-async def root():
-    return {"status": "transcription server running"}

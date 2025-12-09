@@ -24,14 +24,18 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 
 REM ------------------------------
-REM 4. Launch server and recorder in new windows
+REM 4. Launch FastAPI + Realtime server using Uvicorn
 REM ------------------------------
-echo Starting server...
-start cmd /k "python server_v4.py"
+echo Starting FastAPI transcription server...
+start cmd /k "python -m uvicorn server_v4:app --host 0.0.0.0 --port 8000 --reload"
+echo %OPENAI_API_KEY%
 
-REM Optional: wait 2 seconds to let server start
+REM Optional: wait for server to initialize
 timeout /t 2 /nobreak >nul
 
+REM ------------------------------
+REM 5. Open operator view in browser
+REM ------------------------------
 start "" "http://localhost:8000/static/operator.html"
 
 echo Setup complete.
