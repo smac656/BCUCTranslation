@@ -23,7 +23,7 @@ import numpy as np
 import sounddevice as sd
 
 SERVER_CHUNK_URL = "http://localhost:8000/audio_chunk"
-CHUNK_SECONDS = 1.0
+CHUNK_SECONDS = 0.25
 CHANNELS = 1
 DTYPE = "int16"
 
@@ -72,12 +72,12 @@ async def sender_loop():
                 # Compute amplitude ONCE — this value is final
                 amplitude = int(np.ptp(arr))
 
-                # Silence gate
-                if amplitude < 600:
-                    buffer.clear()
-                    last_send = now
-                    await asyncio.sleep(0.001)
-                    continue
+##                # Silence gate
+##                if amplitude < 600:
+##                    buffer.clear()
+##                    last_send = now
+##                    await asyncio.sleep(0.001)
+##                    continue
 
                 # Convert to bytes and send
                 bts = arr.tobytes()

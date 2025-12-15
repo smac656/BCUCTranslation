@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Operator Page - Live Transcription</title>
+<style>
+    body { font-family: Arial; padding: 20px; }
+    button { margin: 5px; padding: 10px; }
+    #status { margin-bottom: 20px; }
+    #transcription {
+        font-size: 1.2em;
+        margin-top: 20px;
+        min-height: 150px;
+        border: 1px solid #ccc;
+        padding: 10px;
+        white-space: pre-wrap;
+    }
+    .status-label { font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>Operator Control</h1>
+
+<div id="status">
+    <div><span class="status-label">Session Status:</span> <span id="session_status">Unknown</span></div>
+    <div><span class="status-label">Recorder Status:</span> <span id="recorder_status">Unknown</span></div>
+</div>
+
+<div>
+    <button id="start_session">Start Session</button>
+    <button id="stop_session">Stop Session</button>
+</div>
+
+<div>
+    <button id="start_recorder">Start Recorder</button>
+    <button id="stop_recorder">Stop Recorder</button>
+</div>
+
+<h3>Live Transcription</h3>
+<div id="transcription">Waiting for transcription…</div>
+
+<script>
+const sessionSpan = document.getElementById("session_status");
+const recorderSpan = document.getElementById("recorder_status");
+const transcriptionDiv = document.getElementById("transcription");
+
+let currentLine = "";
+let transcriptHistory = "";
+
+// ---------------------
+// WebSocket for live transcription
+// ---------------------
+const ws = new WebSocket("ws://localhost:8000/ws/operator");
+
+ws.onopen = () => {
+    console.log("Connected to operator WebSocket.");
+};
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    // Streaming partials
+    if (data.type === "transcript") {
+        currentLine += data.delta;
+        transcriptionDiv.innerText = transcriptHistory + currentLine;
+    }
+
+    // Finalized segment
+    if (data.type === "transcript_done") {
+        transcriptHistory += data.text + "\n\n";
+        currentLine = "";
+        transcriptionDiv.innerText = transcriptHistory;
+    }
+};
+
+ws.onclose = () => {
+    transcriptionDiv.innerText += "\n[Disconnected]";
+    sessionSpan.innerText = "Disconnected";
+    recorderSpan.innerText = "Disconnected";
+};
+
+// ---------------------
+// Button helpers
+// ---------------------
+async function post(url) {
+    const resp = await fetch(url, { method: "POST" });
+    return resp.json();
+}
+
+document.getElementById("start_session").onclick = async () => {
+    sessionSpan.innerText = "Active";
+    await post("/start_session");
+};
+
+document.getElementById("start_recorder").onclick = async () => {
+    recorderSpan.innerText = "Running";
+    await post("/start_recorder");
+};
+
+document.getElementById("stop_recorder").onclick = async () => {
+    recorderSpan.innerText = "Stopped";
+    await post("/stop_recorder");
+};
+
+document.getElementById("stop_session").onclick = async () => {
+    sessionSpan.innerText = "Stopped";
+    recorderSpan.innerText = "Stopped";
+    await post("/stop_session");
+};
+
+</script>
+
+</body>
+</html>

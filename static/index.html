@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live Translation</title>
+<style>
+body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;margin:0;padding:0;background:#111;color:#fff;display:flex;flex-direction:column;align-items:center;}
+#lang{margin:16px}
+#caption{font-size:2.2rem;padding:12px;border-radius:8px;background:rgba(0,0,0,0.4);max-width:95%;text-align:center}
+.muted{opacity:0.7;font-size:0.9rem;margin-top:8px}
+</style>
+</head>
+<body>
+<h2 style="margin-top:18px">Live Translation</h2>
+<select id="lang">
+<option value="en">English</option>
+<option value="zh">Mandarin (中文)</option>
+<option value="ne">Nepali</option>
+<option value="es">Spanish</option>
+</select>
+<div id="caption">Waiting for captions…</div>
+<div class="muted">Keep this page open. Audio subtitles will appear here.</div>
+<script src="/static/ws-client.js"></script>
+</body>
+</html>
